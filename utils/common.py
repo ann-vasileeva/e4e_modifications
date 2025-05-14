@@ -32,6 +32,21 @@ def vis_faces(log_hooks):
 	return fig
 
 
+def vis_faces_masks(seg_loss,loss_dict2,log_hooks):
+	display_count = len(log_hooks)
+	fig = plt.figure(figsize=(16, 10 * display_count))
+	gs = fig.add_gridspec(display_count, 6)
+	for i in range(display_count):
+		hooks_dict = log_hooks[i]
+		fig.add_subplot(gs[i, 0])
+		if 'diff_input' in hooks_dict:
+			vis_faces_with_id_masks(seg_loss,loss_dict2, hooks_dict, fig, gs, i)
+		else:
+			vis_faces_no_id(hooks_dict, fig, gs, i)
+	plt.tight_layout()
+	return fig
+
+
 def vis_faces_with_id(hooks_dict, fig, gs, i):
 	plt.imshow(hooks_dict['input_face'])
 	plt.title('Input\nOut Sim={:.2f}'.format(float(hooks_dict['diff_input'])))
@@ -42,6 +57,27 @@ def vis_faces_with_id(hooks_dict, fig, gs, i):
 	fig.add_subplot(gs[i, 2])
 	plt.imshow(hooks_dict['output_face'])
 	plt.title('Output\n Target Sim={:.2f}'.format(float(hooks_dict['diff_target'])))
+    
+def vis_faces_with_id_masks(seg_loss, farl_metrics,hooks_dict, fig, gs, i):
+	plt.imshow(hooks_dict['input_face'])
+	plt.title('Input\nOut Sim={:.2f}'.format(float(hooks_dict['diff_input'])))
+	fig.add_subplot(gs[i, 1])
+	plt.imshow(hooks_dict['input_mask'])
+	plt.title('BiSeNet Mask')
+	fig.add_subplot(gs[i, 2])
+	plt.imshow(hooks_dict['farl_init_mask'])
+	plt.title('Farl Mask')
+	fig.add_subplot(gs[i, 3])
+	plt.imshow(hooks_dict['output_face'])
+	plt.title('Output\n Target Sim={:.2f}'.format(float(hooks_dict['diff_target'])))
+	fig.add_subplot(gs[i, 4])
+	plt.imshow(hooks_dict['output_mask'])
+	plt.title('BiSeNet\nIoU={:.2f}, Dice={:.2f}'.format(float(seg_loss[0][i]),
+	                                                 float(seg_loss[1][i])))
+	fig.add_subplot(gs[i, 5])
+	plt.imshow(hooks_dict['farl_out_mask'])
+	plt.title('Farl\nIoU={:.2f}, Dice={:.2f}'.format(float(farl_metrics[0][i]),
+	                                                 float(farl_metrics[1][i])))
 
 
 def vis_faces_no_id(hooks_dict, fig, gs, i):

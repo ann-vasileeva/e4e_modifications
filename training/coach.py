@@ -2,17 +2,18 @@ import os
 import random
 import matplotlib
 import matplotlib.pyplot as plt
+import wandb 
 
 matplotlib.use('Agg')
 
 import torch
 from torch import nn, autograd
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
 
-from utils import common, train_utils
-from criteria import id_loss, moco_loss
+from utils import common, train_utils, segmentation_utils
+from criteria import id_loss, moco_loss, seg_loss
 from configs import data_configs
 from datasets.images_dataset import ImagesDataset
 from criteria.lpips.lpips import LPIPS
@@ -21,6 +22,7 @@ from models.latent_codes_pool import LatentCodesPool
 from models.discriminator import LatentCodesDiscriminator
 from models.encoders.psp_encoders import ProgressiveStage
 from training.ranger import Ranger
+from PIL import Image
 
 random.seed(0)
 torch.manual_seed(0)
@@ -36,6 +38,7 @@ class Coach:
         self.opts.device = self.device
         # Initialize network
         self.net = pSp(self.opts).to(self.device)
+        # self.SegHelper = segmentation_utils.SegHelper()
 
         # Initialize loss
         if self.opts.lpips_lambda > 0:
@@ -45,6 +48,8 @@ class Coach:
                 self.id_loss = id_loss.IDLoss().to(self.device).eval()
             else:
                 self.id_loss = moco_loss.MocoLoss(opts).to(self.device).eval()
+        # if self.opts.seg_loss_lambda > 0:
+        self.seg_loss = seg_loss.SegLoss().to(self.device).eval() # we always need seg loss
         self.mse_loss = nn.MSELoss().to(self.device).eval()
 
         # Initialize optimizer
@@ -72,9 +77,9 @@ class Coach:
                                           drop_last=True)
 
         # Initialize logger
-        log_dir = os.path.join(opts.exp_dir, 'logs')
-        os.makedirs(log_dir, exist_ok=True)
-        self.logger = SummaryWriter(log_dir=log_dir)
+        # log_dir = os.path.join(opts.exp_dir, 'logs')
+        # os.makedirs(log_dir, exist_ok=True)
+        # self.logger = SummaryWriter(log_dir=log_dir)
 
         # Initialize checkpoint dir
         self.checkpoint_dir = os.path.join(opts.exp_dir, 'checkpoints')
@@ -86,6 +91,7 @@ class Coach:
         if prev_train_checkpoint is not None:
             self.load_from_train_checkpoint(prev_train_checkpoint)
             prev_train_checkpoint = None
+        print("init is done")
 
     def load_from_train_checkpoint(self, ckpt):
         print('Loading previous training data...')
@@ -103,6 +109,7 @@ class Coach:
         print(f'Resuming training from step {self.global_step}')
 
     def train(self):
+        wandb.init(project="e4e_modifications", config=self.opts)
         self.net.train()
         if self.opts.progressive_steps:
             self.check_for_progressive_training_update()
@@ -112,8 +119,9 @@ class Coach:
                 if self.is_training_discriminator():
                     loss_dict = self.train_discriminator(batch)
                 x, y, y_hat, latent = self.forward(batch)
-                loss, encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
+                loss, encoder_loss_dict, id_logs, _, _ = self.calc_loss(x, y, y_hat, latent, validation=False)
                 loss_dict = {**loss_dict, **encoder_loss_dict}
+
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
@@ -121,17 +129,18 @@ class Coach:
                 # Logging related
                 if self.global_step % self.opts.image_interval == 0 or (
                         self.global_step < 1000 and self.global_step % 25 == 0):
-                    self.parse_and_log_images(id_logs, x, y, y_hat, title='images/train/faces')
+                    wandb.log(loss_dict, step=self.global_step)
+                    self.parse_and_log_images(id_logs, x, y, _, y_hat, title='images/train/faces')
                 if self.global_step % self.opts.board_interval == 0:
                     self.print_metrics(loss_dict, prefix='train')
-                    self.log_metrics(loss_dict, prefix='train')
+                    # self.log_metrics(loss_dict, prefix='train')
 
                 # Validation related
                 val_loss_dict = None
                 if self.global_step % self.opts.val_interval == 0 or self.global_step == self.opts.max_steps:
                     val_loss_dict = self.validate()
-                    if val_loss_dict and (self.best_val_loss is None or val_loss_dict['loss'] < self.best_val_loss):
-                        self.best_val_loss = val_loss_dict['loss']
+                    if val_loss_dict and (self.best_val_loss is None or val_loss_dict['val_losses/loss'] < self.best_val_loss):
+                        self.best_val_loss = val_loss_dict['val_losses/loss']
                         self.checkpoint_me(val_loss_dict, is_best=True)
 
                 if self.global_step % self.opts.save_interval == 0 or self.global_step == self.opts.max_steps:
@@ -164,22 +173,30 @@ class Coach:
                 cur_loss_dict = self.validate_discriminator(batch)
             with torch.no_grad():
                 x, y, y_hat, latent = self.forward(batch)
-                loss, cur_encoder_loss_dict, id_logs = self.calc_loss(x, y, y_hat, latent)
+                loss, cur_encoder_loss_dict, id_logs, seg_img, farl_img = self.calc_loss(x, y, y_hat, latent, validation=True)
+                mask = farl_img[2] > 0.1
+                denom = mask.sum(dim=0)
+                cur_encoder_loss_dict["farl_iou"] = torch.where(denom != 0, (mask * farl_img[2]).sum(dim=0) / denom, 0.0)
+                cur_encoder_loss_dict["farl_dice"] = torch.where(denom != 0, (mask * farl_img[3]).sum(dim=0) / denom, 0.0)
                 cur_loss_dict = {**cur_loss_dict, **cur_encoder_loss_dict}
             agg_loss_dict.append(cur_loss_dict)
 
             # Logging related
-            self.parse_and_log_images(id_logs, x, y, y_hat,
-                                      title='images/test/faces',
-                                      subscript='{:04d}'.format(batch_idx))
+            if batch_idx % 30 == 0: # 30 for small logged subset on validation
+                self.parse_and_log_images(id_logs, x, seg_img, farl_img, y_hat,
+                                          title='images/test/faces',
+                                          subscript='{:04d}'.format(batch_idx // 30), validation=True)
 
             # For first step just do sanity test on small amount of data
             if self.global_step == 0 and batch_idx >= 4:
                 self.net.train()
                 return None  # Do not log, inaccurate in first batch
-
+            
         loss_dict = train_utils.aggregate_loss_dict(agg_loss_dict)
-        self.log_metrics(loss_dict, prefix='test')
+        print("validate")
+        print(loss_dict)
+        wandb.log(loss_dict,step=self.global_step)
+        # self.log_metrics(loss_dict, prefix='test')
         self.print_metrics(loss_dict, prefix='test')
 
         self.net.train()
@@ -229,7 +246,7 @@ class Coach:
         print("Number of test samples: {}".format(len(test_dataset)))
         return train_dataset, test_dataset
 
-    def calc_loss(self, x, y, y_hat, latent):
+    def calc_loss(self, x, y, y_hat, latent, validation): # Calculate loss
         loss_dict = {}
         loss = 0.0
         id_logs = None
@@ -267,58 +284,89 @@ class Coach:
             loss += loss_id * self.opts.id_lambda
         if self.opts.l2_lambda > 0:
             loss_l2 = F.mse_loss(y_hat, y)
-            loss_dict['loss_l2'] = float(loss_l2)
+            loss_dict['loss_l2'] = float(loss_l2) 
             loss += loss_l2 * self.opts.l2_lambda
         if self.opts.lpips_lambda > 0:
             loss_lpips = self.lpips_loss(y_hat, y)
             loss_dict['loss_lpips'] = float(loss_lpips)
             loss += loss_lpips * self.opts.lpips_lambda
+        loss_seg, iou, dice, seg_img, farl_img = self.seg_loss(y_hat, y, validation) #+validation
+        loss_dict['loss_seg'] = float(loss_seg)
+        loss_dict['mean_iou'] = float(iou)
+        loss_dict['mean_dice'] = float(dice)
+        if self.opts.seg_loss_lambda > 0:
+            loss += loss_seg * self.opts.seg_loss_lambda
         loss_dict['loss'] = float(loss)
-        return loss, loss_dict, id_logs
+        return loss, loss_dict, id_logs, seg_img, farl_img
 
     def forward(self, batch):
         x, y = batch
         x, y = x.to(self.device).float(), y.to(self.device).float()
-        y_hat, latent = self.net.forward(x, return_latents=True)
+        # add logits from BiSeNetseg_logits = self.SegHelper.get_logits(x)
+        # seg_logits = self.SegHelper.get_logits(x)
+        # x_extended = torch.cat((x, seg_logits), 1)
+        y_hat, latent = self.net.forward(x, return_latents=True) #change shape of tensor from 3 -> 22
         if self.opts.dataset_type == "cars_encode":
             y_hat = y_hat[:, :, 32:224, :]
         return x, y, y_hat, latent
 
-    def log_metrics(self, metrics_dict, prefix):
-        for key, value in metrics_dict.items():
-            self.logger.add_scalar('{}/{}'.format(prefix, key), value, self.global_step)
+    # def log_metrics(self, metrics_dict, prefix):
+    #     for key, value in metrics_dict.items():
+    #         self.logger.add_scalar('{}/{}'.format(prefix, key), value, self.global_step)
 
     def print_metrics(self, metrics_dict, prefix):
         print('Metrics for {}, step {}'.format(prefix, self.global_step))
         for key, value in metrics_dict.items():
             print('\t{} = '.format(key), value)
 
-    def parse_and_log_images(self, id_logs, x, y, y_hat, title, subscript=None, display_count=2):
+    def parse_and_log_images(self, id_logs, x, y, farl_img, y_hat, title, subscript=None, display_count=1, validation=False): #fixxx
         im_data = []
+        
         for i in range(display_count):
-            cur_im_data = {
-                'input_face': common.log_input_image(x[i], self.opts),
-                'target_face': common.tensor2im(y[i]),
-                'output_face': common.tensor2im(y_hat[i]),
-            }
+            if validation:
+                cur_im_data = {
+                    'input_face': common.log_input_image(x[i], self.opts),
+                    'input_mask': Image.fromarray(y[0][i].detach().cpu().transpose(0, 2).numpy().astype('uint8')),
+                    'farl_init_mask': farl_img[0][i],
+                    'output_face': common.tensor2im(y_hat[i]),
+                    'output_mask': Image.fromarray(y[1][i].detach().cpu().transpose(0, 2).numpy().astype('uint8')),
+                    'farl_out_mask': farl_img[1][i]
+                }
+            else:
+                cur_im_data = {
+                    'input_face': common.log_input_image(x[i], self.opts),
+                    'target_face': common.tensor2im(y[i]),
+                    'output_face': common.tensor2im(y_hat[i]),
+                }               
+
             if id_logs is not None:
                 for key in id_logs[i]:
                     cur_im_data[key] = id_logs[i][key]
             im_data.append(cur_im_data)
-        self.log_images(title, im_data=im_data, subscript=subscript)
+        self.log_images(title, y[2:], farl_img[2:], im_data=im_data, subscript=subscript, validation=validation)
 
-    def log_images(self, name, im_data, subscript=None, log_latest=False):
-        fig = common.vis_faces(im_data)
-        step = self.global_step
-        if log_latest:
-            step = 0
-        if subscript:
-            path = os.path.join(self.logger.log_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
+    def log_images(self, name, loss_dict, loss_dict2, im_data, subscript=None, log_latest=False, validation=False):
+        if validation:
+            fig = common.vis_faces_masks(loss_dict,loss_dict2, im_data)
+            wandb.log({f"{name}_{subscript}": fig},  step=self.global_step)
+            plt.close(fig)
         else:
-            path = os.path.join(self.logger.log_dir, name, '{:04d}.jpg'.format(step))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fig.savefig(path)
-        plt.close(fig)
+            fig = common.vis_faces(im_data)
+            wandb.log({f"{name}_{subscript}": fig},  step=self.global_step)
+            plt.close(fig)
+        # if subscript is None:
+        #     subscript = "0000"
+       # wandb.log({f"{name}_{subscript}": fig},  step=self.global_step)
+        # step = self.global_step
+        # if log_latest:
+        #     step = 0
+        # if subscript:
+        #     path = os.path.join(self.logger.log_dir, name, '{}_{:04d}.jpg'.format(subscript, step))
+        # else:
+        #     path = os.path.join(self.logger.log_dir, name, '{:04d}.jpg'.format(step))
+        # os.makedirs(os.path.dirname(path), exist_ok=True)
+        # fig.savefig(path)
+       
 
     def __get_save_dict(self):
         save_dict = {
@@ -378,6 +426,8 @@ class Coach:
         loss_dict = {}
         x, _ = batch
         x = x.to(self.device).float()
+        # seg_logits = self.SegHelper.get_logits(x)
+        # x = torch.cat((x, seg_logits), 1)
         self.requires_grad(self.discriminator, True)
 
         with torch.no_grad():
@@ -415,6 +465,8 @@ class Coach:
             loss_dict = {}
             x, _ = test_batch
             x = x.to(self.device).float()
+            # seg_logits = self.SegHelper.get_logits(x)
+            # x = torch.cat((x, seg_logits), 1)
             real_w, fake_w = self.sample_real_and_fake_latents(x)
             real_pred = self.discriminator(real_w)
             fake_pred = self.discriminator(fake_w)

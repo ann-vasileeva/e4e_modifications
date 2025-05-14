@@ -49,6 +49,17 @@ class pSp(nn.Module):
             print('Loading encoders weights from irse50!')
             encoder_ckpt = torch.load(model_paths['ir_se50'])
             self.encoder.load_state_dict(encoder_ckpt, strict=False)
+            #load common weights
+            # self.encoder.input_layer_[1].weight.data.copy_(encoder_ckpt['input_layer.1.weight'])
+            # self.encoder.input_layer_[1].bias.data.copy_(encoder_ckpt['input_layer.1.bias'])
+            # self.encoder.input_layer_[1].running_mean.data.copy_(encoder_ckpt['input_layer.1.running_mean'])
+            # self.encoder.input_layer_[1].running_var.data.copy_(encoder_ckpt['input_layer.1.running_var'])
+            # self.encoder.input_layer_[2].weight.data.copy_(encoder_ckpt['input_layer.2.weight'])
+            # #load conv2 partitial weight
+            # with torch.no_grad():
+            #     pretrained_conv_weight = encoder_ckpt['input_layer.0.weight']
+            #     self.encoder.input_layer_[0].weight[:, :3, :, :] = pretrained_conv_weight 
+            
             print('Loading decoder weights from pretrained!')
             ckpt = torch.load(self.opts.stylegan_weights)
             self.decoder.load_state_dict(ckpt['g_ema'], strict=False)

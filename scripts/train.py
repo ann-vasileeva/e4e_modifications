@@ -5,6 +5,7 @@ import os
 import json
 import math
 import sys
+import wandb
 import pprint
 import torch
 from argparse import Namespace
@@ -15,9 +16,11 @@ sys.path.append("..")
 from options.train_options import TrainOptions
 from training.coach import Coach
 
-
 def main():
 	opts = TrainOptions().parse()
+	# warnings.simplefilter('always')  # Показывать все warning
+	# warnings.filterwarnings('always')  # Включить даже подавленные ранее
+	# warnings.showwarning = warn_with_traceback
 	previous_train_ckpt = None
 	if opts.resume_training_from_ckpt:
 		opts, previous_train_ckpt = load_train_checkpoint(opts)

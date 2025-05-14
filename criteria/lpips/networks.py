@@ -77,8 +77,9 @@ class SqueezeNet(BaseNet):
 class AlexNet(BaseNet):
     def __init__(self):
         super(AlexNet, self).__init__()
-
-        self.layers = models.alexnet(True).features
+        alexnet = models.alexnet(weights=None, progress=True)
+        alexnet.load_state_dict(torch.load("/home/ayavasileva/encoder4editing/alexnet-owt-7be5be79.pth"))
+        self.layers = alexnet.features
         self.target_layers = [2, 5, 8, 10, 12]
         self.n_channels_list = [64, 192, 384, 256, 256]
 

@@ -30,6 +30,7 @@ class TrainOptions:
         self.parser.add_argument('--lpips_lambda', default=0.8, type=float, help='LPIPS loss multiplier factor')
         self.parser.add_argument('--id_lambda', default=0.1, type=float, help='ID loss multiplier factor')
         self.parser.add_argument('--l2_lambda', default=1.0, type=float, help='L2 loss multiplier factor')
+        self.parser.add_argument('--seg_loss_lambda', default=0.0001, type=float, help='Segmenation loss multiplier factor')
 
         self.parser.add_argument('--stylegan_weights', default=model_paths['stylegan_ffhq'], type=str,
                                  help='Path to StyleGAN model weights')

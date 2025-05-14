@@ -131,7 +131,7 @@ class Encoder4Editing(Module):
             unit_module = bottleneck_IR
         elif mode == 'ir_se':
             unit_module = bottleneck_IR_SE
-        self.input_layer = Sequential(Conv2d(3, 64, (3, 3), 1, 1, bias=False),
+        self.input_layer = Sequential(Conv2d(3, 64, (3, 3), 1, 1, bias=False), #change num_channels from 3 to 22
                                       BatchNorm2d(64),
                                       PReLU(64))
         modules = []
